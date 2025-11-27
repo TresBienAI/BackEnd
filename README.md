@@ -1,6 +1,6 @@
 # LangGraph Agent API
 
-LangGraph 기반 AI 채팅 API - 수학 연산 툴 지원
+LangGraph 기반 AI 플래너 API
 
 ## 프로젝트 구조
 
