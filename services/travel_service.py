@@ -237,3 +237,4 @@ class TravelPlanService:
             "thread_id": thread_id,
             "summary": result["response"]
         }
+__decription__
