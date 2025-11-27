@@ -49,16 +49,3 @@ curl -X POST http://localhost:8000/chat/ \
     "user_id": "test-user"
   }'
 ```
-
-### GET /chat/history/{thread_id}
-채팅 히스토리 조회
-
-### GET /health
-서버 헬스 체크
-
-## 지원하는 툴
-
-- `add`: 덧셈
-- `subtract`: 뺄셈
-- `multiply`: 곱셈
-- `divide`: 나눗셈
