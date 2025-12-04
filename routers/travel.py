@@ -1,10 +1,15 @@
 """
 Travel API Router - 여행 플랜 생성 API 엔드포인트
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List
 from tools.travel_tools import generate_travel_itinerary
+from auth.auth import get_user_id_from_header
+from db_connection import get_db_session
+from services.user_plan_service import UserPlanService
+import json
+from datetime import datetime
 
 
 class TravelPlanRequest(BaseModel):
@@ -17,6 +22,19 @@ class TravelPlanRequest(BaseModel):
     requirements: List[str] = []
     budget_level: Optional[int] = None
     include_debug: bool = True  # 기본값을 True로 변경 (점수/클러스터링 포함)
+
+
+def convert_datetime_to_str(obj):
+    """
+    datetime 객체를 문자열로 변환 (JSON 직렬화 가능하게)
+    """
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {k: convert_datetime_to_str(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_datetime_to_str(item) for item in obj]
+    return obj
 
 
 def calculate_budget_level(budget_str: str, duration_days: int) -> int:
@@ -112,9 +130,14 @@ async def get_travel_types():
 
 
 @router.post("/plans")
-async def create_itinerary_json(request: TravelPlanRequest):
+async def create_itinerary_json(
+    request: TravelPlanRequest,
+    user_id: str = Depends(get_user_id_from_header)
+):
     """
-    여행 일정을 JSON 형식으로 반환 (프론트엔드용)
+    여행 일정을 JSON 형식으로 반환하고 저장 (프론트엔드용)
+    
+    ⭐ 인증 필수: X-User-ID 헤더가 필요합니다 (인증 서버에서 추가)
     
     - **destination**: 여행지 (예: 서울, 제주도, 부산)
     - **travel_styles**: 여행 스타일 리스트 (예: ["로맨틱한 장소", "맛집 투어"])
@@ -130,18 +153,22 @@ async def create_itinerary_json(request: TravelPlanRequest):
     - level 3: 15만원 이상 (고급)
     
     응답:
+    - plan_id: 저장된 플랜의 고유 ID
+    - user_id: 사용자 ID
     - destination: 여행지
     - duration_days: 여행 기간
     - total_places: 선택된 총 장소 수
     - itinerary: 날짜별 일정 (각 날짜마다 schedule, summary 포함)
     - debug_info: (include_debug=true일 때만) 상세 정보
     """
+    db_session = None
     try:
         # budget_level이 미지정되면 자동으로 계산
         budget_level = request.budget_level
         if budget_level is None:
             budget_level = calculate_budget_level(request.budget, request.duration_days)
         
+        # AI 플랜 생성
         result = generate_travel_itinerary.invoke({
             "destination": request.destination,
             "travel_styles": request.travel_styles,
@@ -151,19 +178,43 @@ async def create_itinerary_json(request: TravelPlanRequest):
             "include_debug": request.include_debug
         })
         
-        # 결과가 Dict인지 확인하고 정렬해서 반환
+        # 데이터베이스에 플랜 저장
+        db_session = get_db_session()
+        
+        # JSON 직렬화 가능하도록 datetime 변환
+        serializable_result = convert_datetime_to_str(result) if isinstance(result, dict) else {"raw_result": str(result)}
+        
+        saved_plan = UserPlanService.save_plan(
+            db_session=db_session,
+            user_id=user_id,
+            destination=request.destination,
+            duration_days=request.duration_days,
+            start_date=request.start_date,
+            travel_styles=request.travel_styles,
+            budget=request.budget,
+            requirements=request.requirements,
+            plan_data=serializable_result
+        )
+        
+        # 결과가 Dict인지 확인하고 반환
         if isinstance(result, dict):
             return {
                 "success": True,
-                "data": result,
-                "message": "여행 일정이 성공적으로 생성되었습니다."
+                "plan_id": saved_plan.plan_id,
+                "user_id": user_id,
+                "destination": request.destination,
+                "duration_days": request.duration_days,
+                "data": serializable_result,
+                "message": "여행 일정이 성공적으로 생성되고 저장되었습니다."
             }
         else:
             # 예상치 못한 형식이면 에러 처리
             return {
                 "success": False,
+                "plan_id": saved_plan.plan_id,
+                "user_id": user_id,
                 "error": f"예상치 못한 응답 형식: {type(result)}",
-                "data": result
+                "data": serializable_result
             }
     except Exception as e:
         import traceback
@@ -173,6 +224,9 @@ async def create_itinerary_json(request: TravelPlanRequest):
             status_code=500,
             detail=f"일정 생성 중 오류 발생: {str(e)}"
         )
+    finally:
+        if db_session:
+            db_session.close()
 
 
 class UpdateHotelRequest(BaseModel):
@@ -186,8 +240,232 @@ class UpdateHotelRequest(BaseModel):
     requirements: list[str] = []
     budget_level: Optional[int] = None
 
+@router.get("/plans")
+async def get_user_plans(
+    user_id: str = Depends(get_user_id_from_header),
+    limit: int = 10,
+    offset: int = 0
+):
+    """
+    현재 사용자의 모든 여행 플랜을 조회합니다. (최신순)
+    
+    ⭐ 인증 필수: X-User-ID 헤더가 필요합니다
+    
+    - **limit**: 조회할 최대 개수 (기본값: 10)
+    - **offset**: 오프셋 (기본값: 0)
+    
+    응답:
+    - plans: 플랜 리스트
+    - total_count: 총 플랜 개수
+    - limit: 요청한 limit 값
+    - offset: 요청한 offset 값
+    """
+    db_session = None
+    try:
+        db_session = get_db_session()
+        plans, total_count = UserPlanService.get_user_plans(
+            db_session=db_session,
+            user_id=user_id,
+            limit=limit,
+            offset=offset
+        )
+        
+        return {
+            "success": True,
+            "user_id": user_id,
+            "plans": [
+                {
+                    "plan_id": plan.plan_id,
+                    "destination": plan.destination,
+                    "duration_days": plan.duration_days,
+                    "start_date": plan.start_date,
+                    "travel_styles": plan.travel_styles,
+                    "budget": plan.budget,
+                    "created_at": plan.created_at.isoformat(),
+                    "updated_at": plan.updated_at.isoformat()
+                }
+                for plan in plans
+            ],
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"플랜 목록 조회 중 오류 발생: {str(e)}"
+        )
+    finally:
+        if db_session:
+            db_session.close()
+
+
+@router.get("/plans/{plan_id}")
+async def get_plan_detail(
+    plan_id: str,
+    user_id: str = Depends(get_user_id_from_header)
+):
+    """
+    저장된 여행 플랜을 상세 조회합니다.
+    
+    ⭐ 인증 필수: X-User-ID 헤더가 필요합니다
+    
+    - **plan_id**: 플랜의 고유 ID
+    
+    응답:
+    - plan_id: 플랜 ID
+    - user_id: 사용자 ID
+    - destination: 여행지
+    - duration_days: 여행 기간
+    - plan_data: 저장된 전체 플랜 데이터
+    - created_at: 생성 시간
+    - updated_at: 업데이트 시간
+    """
+    db_session = None
+    try:
+        db_session = get_db_session()
+        plan = UserPlanService.get_plan_by_id(
+            db_session=db_session,
+            plan_id=plan_id,
+            user_id=user_id
+        )
+        
+        if not plan:
+            raise HTTPException(
+                status_code=404,
+                detail="해당 플랜을 찾을 수 없습니다."
+            )
+        
+        return {
+            "success": True,
+            "plan_id": plan.plan_id,
+            "user_id": plan.user_id,
+            "destination": plan.destination,
+            "duration_days": plan.duration_days,
+            "start_date": plan.start_date,
+            "travel_styles": plan.travel_styles,
+            "budget": plan.budget,
+            "requirements": plan.requirements,
+            "plan_data": plan.plan_data,
+            "created_at": plan.created_at.isoformat(),
+            "updated_at": plan.updated_at.isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"플랜 조회 중 오류 발생: {str(e)}"
+        )
+    finally:
+        if db_session:
+            db_session.close()
+
+
+@router.put("/plans/{plan_id}")
+async def update_plan(
+    plan_id: str,
+    plan_data: dict,
+    user_id: str = Depends(get_user_id_from_header)
+):
+    """
+    저장된 여행 플랜을 업데이트합니다.
+    
+    ⭐ 인증 필수: X-User-ID 헤더가 필요합니다
+    
+    - **plan_id**: 플랜의 고유 ID
+    - **plan_data**: 업데이트할 플랜 데이터
+    
+    응답:
+    - 업데이트된 플랜 정보
+    """
+    db_session = None
+    try:
+        db_session = get_db_session()
+        updated_plan = UserPlanService.update_plan(
+            db_session=db_session,
+            plan_id=plan_id,
+            user_id=user_id,
+            plan_data=plan_data
+        )
+        
+        if not updated_plan:
+            raise HTTPException(
+                status_code=404,
+                detail="해당 플랜을 찾을 수 없습니다."
+            )
+        
+        return {
+            "success": True,
+            "plan_id": updated_plan.plan_id,
+            "user_id": updated_plan.user_id,
+            "message": "플랜이 성공적으로 업데이트되었습니다.",
+            "updated_at": updated_plan.updated_at.isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"플랜 업데이트 중 오류 발생: {str(e)}"
+        )
+    finally:
+        if db_session:
+            db_session.close()
+
+
+@router.delete("/plans/{plan_id}")
+async def delete_plan(
+    plan_id: str,
+    user_id: str = Depends(get_user_id_from_header)
+):
+    """
+    저장된 여행 플랜을 삭제합니다.
+    
+    ⭐ 인증 필수: X-User-ID 헤더가 필요합니다
+    
+    - **plan_id**: 플랜의 고유 ID
+    
+    응답:
+    - 삭제 성공 메시지
+    """
+    db_session = None
+    try:
+        db_session = get_db_session()
+        success = UserPlanService.delete_plan(
+            db_session=db_session,
+            plan_id=plan_id,
+            user_id=user_id
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=404,
+                detail="해당 플랜을 찾을 수 없습니다."
+            )
+        
+        return {
+            "success": True,
+            "message": "플랜이 성공적으로 삭제되었습니다.",
+            "plan_id": plan_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"플랜 삭제 중 오류 발생: {str(e)}"
+        )
+    finally:
+        if db_session:
+            db_session.close()
+
+
 @router.post("/plans/update-hotel")
-async def update_hotel_and_recalculate(request: UpdateHotelRequest):
+async def update_hotel_and_recalculate(
+    request: UpdateHotelRequest,
+    user_id: str = Depends(get_user_id_from_header)
+):
     """
     선택된 호텔을 변경하고 일정을 재계산
     
@@ -256,7 +534,10 @@ class ReplacePlaceRequest(BaseModel):
     duration_days: int
 
 @router.post("/plans/replace-place")
-async def replace_place_and_recalculate(request: ReplacePlaceRequest):
+async def replace_place_and_recalculate(
+    request: ReplacePlaceRequest,
+    user_id: str = Depends(get_user_id_from_header)
+):
     """
     특정 날짜의 장소를 다른 장소로 교체하고 일정을 재계산
     

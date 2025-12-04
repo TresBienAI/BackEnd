@@ -4,14 +4,165 @@
 
 ## 📋 목차
 
-1. [시작하기](#시작하기)
-2. [API 엔드포인트](#api-엔드포인트)
-3. [데이터 구조](#데이터-구조)
-4. [요청/응답 예시](#요청응답-예시)
-5. [주요 기능 구현](#주요-기능-구현)
-6. [에러 처리](#에러-처리)
-7. [React 예제](#react-예제)
-8. [Vue.js 예제](#vuejs-예제)
+1. [🔐 로그인 & 인증](#🔐-로그인--인증)
+2. [시작하기](#시작하기)
+3. [API 엔드포인트](#api-엔드포인트)
+4. [데이터 구조](#데이터-구조)
+5. [요청/응답 예시](#요청응답-예시)
+6. [주요 기능 구현](#주요-기능-구현)
+7. [에러 처리](#에러-처리)
+8. [React 예제](#react-예제)
+9. [Vue.js 예제](#vuejs-예제)
+
+---
+
+## 🔐 로그인 & 인증
+
+### 📝 인증 흐름
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Step 1: 카카오 로그인                                    │
+│ https://gallemalle-auth-service.../login               │
+│ → access_token 받음                                     │
+└─────────────────┬───────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────┐
+│ Step 2: 토큰 검증 (인증 서버)                           │
+│ POST https://gallemalle-auth-service.../travel         │
+│ Header: Authorization: Bearer {access_token}          │
+│ → X-User-ID 헤더 추가됨                                │
+└─────────────────┬───────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────┐
+│ Step 3: 우리 서버에 요청                               │
+│ POST http://localhost:8000/travel/plans               │
+│ Header: X-User-ID: {user_id}                          │
+│ → 플랜 생성 & DB에 저장                               │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 1️⃣ 카카오 로그인
+
+```html
+<!-- 카카오 로그인 버튼 -->
+<a href="https://gallemalle-auth-service.politebeach-e8d743e5.eastus2.azurecontainerapps.io/login">
+  카카오로 로그인
+</a>
+```
+
+### 2️⃣ 토큰 저장 및 사용
+
+```javascript
+// 1. 로그인 후 URL에서 access_token 추출
+const urlParams = new URLSearchParams(window.location.search);
+const accessToken = urlParams.get('access_token');
+
+// 2. localStorage에 저장
+if (accessToken) {
+  localStorage.setItem('accessToken', accessToken);
+  // 카카오 로그인 서버로 리다이렉트
+  window.location.href = 'https://gallemalle-auth-service.politebeach-e8d743e5.eastus2.azurecontainerapps.io/travel';
+}
+
+// 3. 저장된 토큰으로 X-User-ID 얻기 (인증 서버가 헤더 추가)
+const token = localStorage.getItem('accessToken');
+```
+
+### 3️⃣ 인증이 필요한 API 요청
+
+```javascript
+// ⭐ 중요: X-User-ID 헤더 필수!
+async function apiRequest(endpoint, method = "GET", data = null, userId = null) {
+  const headers = {
+    "Content-Type": "application/json",
+  };
+
+  // X-User-ID 헤더 추가 (인증이 필요한 엔드포인트)
+  if (userId) {
+    headers["X-User-ID"] = userId;
+  }
+
+  const options = {
+    method,
+    headers,
+  };
+
+  if (data) {
+    options.body = JSON.stringify(data);
+  }
+
+  try {
+    const response = await fetch(`http://localhost:8000${endpoint}`, options);
+
+    if (response.status === 401) {
+      // 인증 실패 - 다시 로그인
+      alert("인증이 필요합니다. 다시 로그인해주세요.");
+      window.location.href = 'https://gallemalle-auth-service.politebeach-e8d743e5.eastus2.azurecontainerapps.io/login';
+      return;
+    }
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || `API Error: ${response.statusText}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error("API 요청 실패:", error.message);
+    throw error;
+  }
+}
+```
+
+### 4️⃣ 로그인 상태 확인
+
+```javascript
+function isLoggedIn() {
+  return !!localStorage.getItem('accessToken');
+}
+
+function logout() {
+  localStorage.removeItem('accessToken');
+  localStorage.removeItem('userId');
+  window.location.href = '/';
+}
+
+// 페이지 로드 시 확인
+if (!isLoggedIn()) {
+  window.location.href = 'https://gallemalle-auth-service.politebeach-e8d743e5.eastus2.azurecontainerapps.io/login';
+}
+```
+
+### 5️⃣ 사용자 ID 저장하기 (인증 서버 콜백)
+
+```javascript
+// 인증 서버가 우리 서버로 X-User-ID 헤더 추가해서 요청할 때
+// 우리는 첫 번째 API 요청에서 user_id를 얻을 수 있습니다
+
+async function getUserIdFromServer(accessToken) {
+  try {
+    // 인증 서버가 X-User-ID를 헤더에 추가해서 전달
+    const response = await fetch('https://gallemalle-auth-service.politebeach-e8d743e5.eastus2.azurecontainerapps.io/travel', {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`
+      }
+    });
+
+    // 응답 헤더에서 X-User-ID 추출
+    const userId = response.headers.get('X-User-ID');
+    if (userId) {
+      localStorage.setItem('userId', userId);
+      return userId;
+    }
+  } catch (error) {
+    console.error("User ID 조회 실패:", error);
+  }
+}
+```
 
 ---
 
@@ -22,27 +173,49 @@
 ```javascript
 const API_BASE_URL = "http://localhost:8000";
 
-// 기본 요청 함수
-async function apiRequest(endpoint, method = "GET", data = null) {
+// ⭐ 개선된 요청 함수 (X-User-ID 헤더 포함)
+async function apiRequest(endpoint, method = "GET", data = null, userId = null) {
+  const headers = {
+    "Content-Type": "application/json",
+  };
+
+  // X-User-ID 헤더 추가 (인증이 필요한 엔드포인트)
+  if (userId) {
+    headers["X-User-ID"] = userId;
+  }
+
   const options = {
     method,
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers,
   };
 
   if (data) {
     options.body = JSON.stringify(data);
   }
 
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
-  
-  if (!response.ok) {
-    throw new Error(`API Error: ${response.statusText}`);
-  }
+  try {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
+    
+    if (response.status === 401) {
+      // 인증 실패
+      console.error("인증 실패: X-User-ID 헤더가 필요합니다.");
+      throw new Error("인증이 필요합니다. 다시 로그인해주세요.");
+    }
 
-  return await response.json();
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || `API Error: ${response.statusText}`);
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error("API 요청 실패:", error.message);
+    throw error;
+  }
 }
+
+// 사용 예시: userId와 함께 호출
+// const plan = await apiRequest("/travel/plans", "POST", planData, userId);
 ```
 
 ---
@@ -89,11 +262,18 @@ const types = await apiRequest("/travel/types");
 
 ---
 
-### 3. POST /travel/plans
-여행 일정을 생성합니다.
+### 3. POST /travel/plans (⭐ 인증 필수)
+여행 일정을 생성하고 DB에 저장합니다.
+
+**⭐ 필수 헤더:**
+```
+X-User-ID: {user_id}
+```
 
 **요청:**
 ```javascript
+const userId = localStorage.getItem('userId'); // 로그인한 사용자 ID
+
 const planRequest = {
   destination: "서울",
   start_date: "2025-12-20",
@@ -104,18 +284,117 @@ const planRequest = {
   include_debug: false
 };
 
-const plan = await apiRequest("/travel/plans", "POST", planRequest);
+// ⭐ userId를 함께 전달
+const plan = await apiRequest("/travel/plans", "POST", planRequest, userId);
 ```
 
 **응답 구조:**
 ```json
 {
   "success": true,
-  "message": "여행 일정이 성공적으로 생성되었습니다.",
+  "plan_id": "b1fe4398-3116-4ba8-99bd-4133c601cdb6",
+  "user_id": "5",
+  "destination": "서울",
+  "duration_days": 2,
+  "message": "여행 일정이 성공적으로 생성되고 저장되었습니다.",
   "data": {
     "destination": "서울",
     "duration_days": 2,
     "total_places": 10,
+    "itinerary": [
+      {
+        "day": 1,
+        "schedule": [
+          {
+            "name": "그린랩",
+            "type": "음식점",
+            "latitude": 37.5607,
+            "longitude": 126.9735
+          }
+        ]
+      }
+    ],
+    "debug_info": {
+      "total_searched_places": 6653,
+      "selected_places_count": 10,
+      "alternative_places_count": 20,
+      "selected_places": [...],
+      "alternative_places": [...]
+    }
+  }
+}
+```
+
+**💾 저장되는 위치:**
+- 데이터베이스: PostgreSQL
+- 테이블: `user_travel_plans`
+- 저장 정보:
+  - `plan_id`: 생성된 플랜의 고유 ID (UUID)
+  - `user_id`: 로그인한 사용자 ID
+  - `destination`: 여행지
+  - `duration_days`: 여행 기간
+  - `plan_data`: 전체 1일차, 2일차 일정 + 예비 후보 (JSON)
+
+---
+
+### 4. GET /travel/plans (⭐ 인증 필수)
+사용자의 모든 저장된 플랜 조회
+
+**⭐ 필수 헤더:**
+```
+X-User-ID: {user_id}
+```
+
+**요청:**
+```javascript
+const userId = localStorage.getItem('userId');
+
+// 사용자의 모든 플랜 조회
+const response = await apiRequest("/travel/plans", "GET", null, userId);
+```
+
+**응답:**
+```json
+{
+  "success": true,
+  "user_id": "5",
+  "plans": [
+    {
+      "plan_id": "b1fe4398-3116-4ba8-99bd-4133c601cdb6",
+      "destination": "서울",
+      "duration_days": 2,
+      "created_at": "2025-12-04T11:37:54.470733",
+      "updated_at": "2025-12-04T11:37:54.470741"
+    }
+  ],
+  "total_count": 2,
+  "limit": 10,
+  "offset": 0
+}
+```
+
+---
+
+### 5. GET /travel/plans/{plan_id} (⭐ 인증 필수)
+저장된 특정 플랜 조회
+
+**요청:**
+```javascript
+const userId = localStorage.getItem('userId');
+const planId = "b1fe4398-3116-4ba8-99bd-4133c601cdb6";
+
+const plan = await apiRequest(`/travel/plans/${planId}`, "GET", null, userId);
+```
+
+**응답:**
+```json
+{
+  "success": true,
+  "plan_id": "b1fe4398-3116-4ba8-99bd-4133c601cdb6",
+  "user_id": "5",
+  "destination": "서울",
+  "duration_days": 2,
+  "plan_data": {
     "itinerary": [
       {
         "day": 1,
@@ -128,11 +407,13 @@ const plan = await apiRequest("/travel/plans", "POST", planRequest);
 
 ---
 
-### 4. POST /travel/plans/update-hotel
+### 6. POST /travel/plans/update-hotel (⭐ 인증 필수)
 호텔을 변경하고 일정을 재계산합니다.
 
 **요청:**
 ```javascript
+const userId = localStorage.getItem('userId');
+
 const hotelChangeRequest = {
   destination: "서울",
   travel_styles: ["자연"],
@@ -148,20 +429,24 @@ const hotelChangeRequest = {
   requirements: []
 };
 
+// ⭐ userId를 함께 전달
 const newPlan = await apiRequest(
   "/travel/plans/update-hotel",
   "POST",
-  hotelChangeRequest
+  hotelChangeRequest,
+  userId
 );
 ```
 
 ---
 
-### 5. POST /travel/plans/replace-place
+### 7. POST /travel/plans/replace-place (⭐ 인증 필수)
 특정 장소를 다른 장소로 교체합니다.
 
 **요청:**
 ```javascript
+const userId = localStorage.getItem('userId');
+
 const replaceRequest = {
   day: 1,
   old_place: {
@@ -184,11 +469,35 @@ const replaceRequest = {
   requirements: []
 };
 
+// ⭐ userId를 함께 전달
 const updatedPlan = await apiRequest(
   "/travel/plans/replace-place",
   "POST",
-  replaceRequest
+  replaceRequest,
+  userId
 );
+```
+
+---
+
+### 8. DELETE /travel/plans/{plan_id} (⭐ 인증 필수)
+저장된 플랜 삭제
+
+**요청:**
+```javascript
+const userId = localStorage.getItem('userId');
+const planId = "b1fe4398-3116-4ba8-99bd-4133c601cdb6";
+
+const response = await apiRequest(`/travel/plans/${planId}`, "DELETE", null, userId);
+```
+
+**응답:**
+```json
+{
+  "success": true,
+  "message": "플랜이 성공적으로 삭제되었습니다.",
+  "plan_id": "b1fe4398-3116-4ba8-99bd-4133c601cdb6"
+}
 ```
 
 ---
@@ -357,11 +666,17 @@ const response = await apiRequest("/travel/plans", "POST", {
 
 ## 주요 기능 구현
 
-### 1️⃣ 여행 계획 생성
+### 1️⃣ 여행 계획 생성 (⭐ 인증 필수)
 
 ```javascript
 async function generateTravelPlan(formData) {
   try {
+    const userId = localStorage.getItem('userId');
+    if (!userId) {
+      throw new Error("로그인이 필요합니다.");
+    }
+
+    // ⭐ userId를 함께 전달
     const response = await apiRequest("/travel/plans", "POST", {
       destination: formData.destination,
       start_date: formData.startDate,
@@ -370,7 +685,13 @@ async function generateTravelPlan(formData) {
       budget: formData.budget,
       requirements: formData.requirements,
       include_debug: false
-    });
+    }, userId);  // ← userId 추가
+
+    // 응답에는 plan_id가 포함됨
+    console.log("생성된 플랜 ID:", response.plan_id);
+    
+    // localStorage에 현재 플랜 ID 저장 (필요시)
+    localStorage.setItem('currentPlanId', response.plan_id);
 
     return response.data;
   } catch (error) {
@@ -438,13 +759,19 @@ function subtractMinutes(time, minutes) {
 }
 ```
 
-### 3️⃣ 호텔 변경
+### 3️⃣ 호텔 변경 (⭐ 인증 필수)
 
 ```javascript
 async function changeHotel(currentPlan, newHotel) {
+  const userId = localStorage.getItem('userId');
+  if (!userId) {
+    throw new Error("로그인이 필요합니다.");
+  }
+
   const allPlaces = extractAllPlaces(currentPlan);
   const nonHotels = allPlaces.filter(p => p.type !== "숙박");
 
+  // ⭐ userId를 함께 전달
   const response = await apiRequest(
     "/travel/plans/update-hotel",
     "POST",
@@ -456,7 +783,8 @@ async function changeHotel(currentPlan, newHotel) {
       selected_places: nonHotels,
       new_hotel: newHotel,
       requirements: currentPlan.requirements
-    }
+    },
+    userId  // ← userId 추가
   );
 
   return response.data;
@@ -473,13 +801,19 @@ function extractAllPlaces(plan) {
 }
 ```
 
-### 4️⃣ 장소 교체
+### 4️⃣ 장소 교체 (⭐ 인증 필수)
 
 ```javascript
 async function replacePlace(currentPlan, dayIndex, oldPlace, newPlace) {
+  const userId = localStorage.getItem('userId');
+  if (!userId) {
+    throw new Error("로그인이 필요합니다.");
+  }
+
   const day = currentPlan.itinerary[dayIndex];
   const allPlaces = extractAllPlaces(currentPlan);
 
+  // ⭐ userId를 함께 전달
   const response = await apiRequest(
     "/travel/plans/replace-place",
     "POST",
@@ -493,7 +827,8 @@ async function replacePlace(currentPlan, dayIndex, oldPlace, newPlace) {
       duration_days: currentPlan.duration_days,
       budget: currentPlan.budget,
       requirements: currentPlan.requirements
-    }
+    },
+    userId  // ← userId 추가
   );
 
   return response.data;
@@ -556,14 +891,17 @@ try {
 
 ## React 예제
 
-### 기본 구조
+### 기본 구조 (⭐ 로그인 포함)
 
 ```jsx
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import "./TravelPlanner.css";
 
 const TravelPlanner = () => {
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [userId, setUserId] = useState(null);
   const [plan, setPlan] = useState(null);
+  const [savedPlans, setSavedPlans] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [formData, setFormData] = useState({
@@ -574,35 +912,141 @@ const TravelPlanner = () => {
     requirements: [],
   });
 
+  // 페이지 로드 시 로그인 상태 확인
+  useEffect(() => {
+    const token = localStorage.getItem('accessToken');
+    const user = localStorage.getItem('userId');
+    if (token && user) {
+      setIsLoggedIn(true);
+      setUserId(user);
+      loadSavedPlans(user);
+    }
+  }, []);
+
+  // 저장된 플랜 로드
+  const loadSavedPlans = useCallback(async (user) => {
+    try {
+      const response = await fetch("http://localhost:8000/travel/plans", {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-ID": user,  // ⭐ 필수 헤더
+        },
+      });
+
+      if (!response.ok) throw new Error("플랜 조회 실패");
+      const data = await response.json();
+      setSavedPlans(data.plans || []);
+    } catch (err) {
+      console.error("플랜 조회 실패:", err);
+    }
+  }, []);
+
+  // 여행 계획 생성
   const generatePlan = useCallback(async () => {
+    if (!userId) {
+      setError("로그인이 필요합니다.");
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
       const response = await fetch("http://localhost:8000/travel/plans", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-ID": userId,  // ⭐ 필수 헤더
+        },
         body: JSON.stringify(formData),
       });
 
       if (!response.ok) throw new Error("계획 생성 실패");
       const data = await response.json();
       setPlan(data.data);
+      
+      // 저장된 플랜 목록 새로고침
+      loadSavedPlans(userId);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [formData]);
+  }, [formData, userId, loadSavedPlans]);
+
+  // 로그아웃
+  const handleLogout = () => {
+    localStorage.removeItem('accessToken');
+    localStorage.removeItem('userId');
+    setIsLoggedIn(false);
+    setUserId(null);
+    setPlan(null);
+    setSavedPlans([]);
+  };
+
+  // 저장된 플랜 선택
+  const loadPlan = async (planId) => {
+    try {
+      const response = await fetch(`http://localhost:8000/travel/plans/${planId}`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-ID": userId,  // ⭐ 필수 헤더
+        },
+      });
+
+      if (!response.ok) throw new Error("플랜 조회 실패");
+      const data = await response.json();
+      setPlan(data.plan_data);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  if (!isLoggedIn) {
+    return (
+      <div className="login-section">
+        <h2>여행 플래너</h2>
+        <p>카카오로 로그인하여 시작하세요</p>
+        <a href="https://gallemalle-auth-service.politebeach-e8d743e5.eastus2.azurecontainerapps.io/login">
+          <button>카카오로 로그인</button>
+        </a>
+      </div>
+    );
+  }
 
   return (
     <div className="travel-planner">
+      <div className="header">
+        <h1>여행 플래너</h1>
+        <div className="user-info">
+          <span>사용자 ID: {userId}</span>
+          <button onClick={handleLogout}>로그아웃</button>
+        </div>
+      </div>
+
       <div className="form-section">
-        <h2>여행 계획 생성</h2>
+        <h2>새 여행 계획 생성</h2>
         <button onClick={generatePlan} disabled={loading}>
           {loading ? "생성 중..." : "계획 생성"}
         </button>
         {error && <div className="error">{error}</div>}
       </div>
+
+      {savedPlans.length > 0 && (
+        <div className="saved-plans-section">
+          <h2>저장된 플랜</h2>
+          <div className="plans-list">
+            {savedPlans.map((p) => (
+              <div key={p.plan_id} className="plan-card">
+                <h3>{p.destination}</h3>
+                <p>{p.duration_days}일</p>
+                <button onClick={() => loadPlan(p.plan_id)}>보기</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {plan && (
         <div className="itinerary-section">
@@ -634,7 +1078,7 @@ const ScheduleItem = ({ item }) => {
 
   return (
     <div className="schedule-item">
-      <h4>{item.place.name}</h4>
+      <h4>{item.place?.name || item.name || "N/A"}</h4>
       <p className="time">
         {item.start_time} - {item.end_time}
       </p>
@@ -676,6 +1120,89 @@ export default TravelPlanner;
   margin: 0 auto;
   padding: 20px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto;
+}
+
+/* 로그인 섹션 */
+.login-section {
+  text-align: center;
+  margin-top: 50px;
+}
+
+.login-section button {
+  background: #fee500;
+  color: #000;
+  border: none;
+  padding: 15px 30px;
+  border-radius: 4px;
+  font-weight: bold;
+  cursor: pointer;
+  font-size: 16px;
+  margin-top: 20px;
+}
+
+.login-section button:hover {
+  opacity: 0.9;
+}
+
+/* 헤더 */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 30px;
+  padding-bottom: 20px;
+  border-bottom: 2px solid #ddd;
+}
+
+.user-info {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+}
+
+.user-info button {
+  background: #dc3545;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.user-info button:hover {
+  background: #c82333;
+}
+
+/* 저장된 플랜 */
+.saved-plans-section {
+  margin-bottom: 30px;
+}
+
+.plans-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 15px;
+}
+
+.plan-card {
+  background: #f0f0f0;
+  padding: 15px;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.plan-card button {
+  background: #007bff;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-top: 10px;
+}
+
+.plan-card button:hover {
+  background: #0056b3;
 }
 
 .form-section {
