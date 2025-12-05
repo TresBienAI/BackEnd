@@ -780,7 +780,7 @@ MIT License - 자유롭게 사용하세요!
 
 - 🐛 **버그 리포트**: GitHub Issues
 - 💡 **제안사항**: GitHub Discussions
-- 📧 **이메일**: contact@example.com
+- 📧 **이메일**: koip6782@gmail.com
 
 ---
 
